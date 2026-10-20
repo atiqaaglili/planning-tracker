@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="fr"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Suivi des heures de cours</title>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--tx:#1b2430;--mu:#667085;--bd:#dde1e7;--ac:#1f5fbf;--ok:#1a7f4b;--wa:#b54708;--hd:#eef2f8;color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#12161c;--card:#1b212a;--tx:#e8ecf2;--mu:#9aa5b5;--bd:#303845;--ac:#6ea2f0;--ok:#5fcf93;--wa:#f0a35e;--hd:#232b36;color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#12161c;--card:#1b212a;--tx:#e8ecf2;--mu:#9aa5b5;--bd:#303845;--ac:#6ea2f0;--ok:#5fcf93;--wa:#f0a35e;--hd:#232b36;color-scheme:dark}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--tx);font:15px/1.45 system-ui,-apple-system,"Segoe UI",Arial,sans-serif}
+header{padding:14px 18px 0}h1{font-size:19px;margin:0 0 10px}
+#nav{display:flex;gap:6px;flex-wrap:wrap;padding:0 18px 12px;border-bottom:1px solid var(--bd)}
+#nav button,.btn{font:inherit;border:1px solid var(--bd);background:var(--card);color:var(--tx);padding:6px 11px;border-radius:7px;cursor:pointer}
+#nav button.on,.btn.pri{background:var(--ac);border-color:var(--ac);color:#fff}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+main{padding:18px;max-width:1200px;margin:auto}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:14px 16px;margin-bottom:14px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:12px}
+.fc{cursor:pointer}.fc b{display:block}.fc .n{font-size:26px;font-weight:650;color:var(--ac)}
+.sc{overflow-x:auto;max-width:100%}table{border-collapse:collapse;width:100%}
+th,td{border:1px solid var(--bd);padding:7px 10px;text-align:right;white-space:nowrap}
+th:first-child,td:first-child{text-align:left;white-space:normal;min-width:240px}
+thead th,tfoot td{background:var(--hd);font-weight:650}td.z{color:var(--mu)}
+.mu{color:var(--mu)}.ok{color:var(--ok)}.wa{color:var(--wa)}
+select,input[type=text]{font:inherit;padding:5px 8px;border:1px solid var(--bd);border-radius:6px;background:var(--card);color:var(--tx);max-width:100%}
+.map{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:10px}.map label{display:block;font-size:13px;color:var(--mu)}.map select{width:100%}
+.bar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:12px}
+</style></head><body>
+<header><h1>Suivi des heures de cours réalisées</h1></header>
+<div id="nav"></div><main id="main"></main>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script>
+const $=s=>document.querySelector(s),esc=s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const pad=n=>String(n).padStart(2,"0"),norm=s=>String(s).toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/[^a-z0-9]/g,"");
+const JOURS=["Dimanche","Lundi","Mardi","Mercredi","Jeudi","Vendredi","Samedi"];
+const FIELDS=[["module","Module *",["module","titre","matiere"]],["date","Date de la séance *",["dateseance","date"]],["hd","Heure de début *",["hd","debut","heuredebut"]],["hf","Heure de fin *",["hf","fin","heurefin"]],["id","Identifiant unique (facultatif)",["idseance","id","identifiant"]],["groupe","Groupe / classe (facultatif)",["groupe","classe","group"]],["fil","Colonne filière (facultatif)",["cursus","filiere","formation"]]];
+let S={filieres:[],seances:[],weekStart:1},page="dash",wsel=null,imp=null,msg="";
+
+/* ---------- Base persistante (IndexedDB) ---------- */
+const idb=()=>new Promise((ok,ko)=>{const r=indexedDB.open("suivi-heures",1);r.onupgradeneeded=()=>r.result.createObjectStore("st");r.onsuccess=()=>ok(r.result);r.onerror=()=>ko(r.error)});
+async function load(){try{const d=await idb();const v=await new Promise(r=>{const q=d.transaction("st").objectStore("st").get("s");q.onsuccess=()=>r(q.result);q.onerror=()=>r(null)});if(v)S=v}catch(e){}S.vol=S.vol||{};S.alias=S.alias||{};S.dur=S.dur||2;S.merge=S.merge||{}}
+async function save(){try{const d=await idb();d.transaction("st","readwrite").objectStore("st").put(S,"s")}catch(e){alert("Enregistrement impossible dans ce navigateur : les données ne seront pas conservées.")}}
+
+/* ---------- Lecture des fichiers ---------- */
+const rd=f=>new Promise(r=>{const x=new FileReader();x.onload=()=>r(x.result);x.readAsArrayBuffer(f)});
+async function parse(f){
+ const buf=await rd(f),head=new TextDecoder().decode(buf.slice(0,300));
+ if(head.includes("<?xml")&&head.includes("Workbook")){ // « .xls » au format XML Excel 2003
+  const doc=new DOMParser().parseFromString(new TextDecoder().decode(buf),"application/xml");
+  return [...doc.getElementsByTagName("Worksheet")[0].getElementsByTagName("Row")].map(r=>{const a=[];let i=0;
+   for(const c of r.getElementsByTagName("Cell")){const ix=c.getAttribute("ss:Index");if(ix)i=+ix-1;const d=c.getElementsByTagName("Data")[0];a[i++]=d?d.textContent:""}return a});}
+ const wb=XLSX.read(buf,{type:"array"});return XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{header:1,raw:true,defval:""});
+}
+function nd(v){if(v===""||v==null)return null;
+ if(typeof v==="number"){const d=new Date((Math.floor(v)-25569)*864e5);return d.getUTCFullYear()+"-"+pad(d.getUTCMonth()+1)+"-"+pad(d.getUTCDate())}
+ const t=String(v).trim();let m=t.match(/^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{4})/);if(m)return m[3]+"-"+pad(m[2])+"-"+pad(m[1]);
+ m=t.match(/^(\d{4})-(\d{2})-(\d{2})/);return m?m[0]:null}
+function nt(v){if(v===""||v==null)return null;
+ if(typeof v==="number"){const mn=Math.round((v%1)*1440);return pad(Math.floor(mn/60))+":"+pad(mn%60)}
+ const m=String(v).trim().match(/^(\d{1,2})[:hH](\d{2})/);return m?pad(m[1])+":"+m[2]:null}
+const tm=t=>+t.slice(0,2)*60+ +t.slice(3);
+
+/* ---------- Semaines ---------- */
+const wkOf=d=>{const [y,m,j]=d.split("-").map(Number),t=new Date(Date.UTC(y,m-1,j));t.setUTCDate(t.getUTCDate()-((t.getUTCDay()-S.weekStart+7)%7));return t.toISOString().slice(0,10)};
+const lab=w=>w.slice(8)+"/"+w.slice(5,7),fr=d=>d.slice(8)+"/"+d.slice(5,7)+"/"+d.slice(0,4);
+const fh=h=>(Math.round(h*100)/100).toString().replace(".",",")+" h";
+
+/* ---------- Analyse d’un import et détection des doublons ---------- */
+const same=(a,b)=>a.module===b.module&&a.date===b.date&&a.hd===b.hd&&a.hf===b.hf&&(!a.groupe||!b.groupe||a.groupe===b.groupe);
+function analyze(){
+ const {rows,map,fil}=imp,o={nouv:[],dup:0,conf:[],bad:[],prev:[]};
+ const pool=S.seances.filter(s=>s.filiere===fil).map(s=>s);
+ rows.forEach((r,i)=>{
+  const g=k=>map[k]>=0?r[map[k]]:"";
+  const s={uid:Date.now().toString(36)+Math.random().toString(36).slice(2,8),filiere:fil,module:String(g("module")).trim(),date:nd(g("date")),hd:nt(g("hd")),hf:nt(g("hf")),ext_id:String(g("id")).trim(),groupe:String(g("groupe")).trim().replace(/^gr\s*:\s*/i,"")};
+  if(!s.module||!s.date||!s.hd||!s.hf||tm(s.hf)<=tm(s.hd)){o.bad.push(i+2);return}
+  s.dur=(tm(s.hf)-tm(s.hd))/60;if(o.prev.length<6)o.prev.push(s);
+  if(s.ext_id){const m=pool.find(p=>p.ext_id===s.ext_id);
+   if(m){if(same(m,s))o.dup++;else o.conf.push({t:"id",s,c:[m],ch:""});return}
+   if(pool.some(p=>same(p,s)&&!p.ext_id)){o.dup++;return}}
+  else{const m=pool.find(p=>same(p,s));
+   if(m){if(m._f&&!m.ext_id)o.conf.push({t:"mm",s,c:[m],ch:""});else o.dup++;return}}
+  const near=pool.filter(p=>p.module===s.module&&p.date===s.date&&!same(p,s)&&!(s.ext_id&&p.ext_id)&&(!p.groupe||!s.groupe||p.groupe===s.groupe));
+  if(near.length){o.conf.push({t:"near",s,c:near,ch:""});return}
+  s._f=true;o.nouv.push(s);pool.push(s);
+ });
+ imp.out=o;
+}
+function apply(){
+ const o=imp.out;if(!S.filieres.includes(imp.fil))S.filieres.push(imp.fil);
+ let add=0,upd=0;
+ o.nouv.forEach(s=>{delete s._f;S.seances.push(s);add++});
+ o.conf.forEach(c=>{const ch=c.ch;
+  if(ch==="new"){S.seances.push(c.s);add++}
+  else if(ch.startsWith("u:")){const t=S.seances.find(x=>x.uid===ch.slice(2));if(t){Object.assign(t,c.s,{uid:t.uid});upd++}}});
+ msg=`Import terminé : ${add} séance(s) ajoutée(s), ${upd} modifiée(s), ${o.dup} doublon(s) ignoré(s).`;
+ page="f:"+S.filieres.indexOf(imp.fil);imp=null;save();view();
+}
+
+/* ---------- Vues ---------- */
+function nav(){
+ $("#nav").innerHTML=`<button class="${page==="dash"?"on":""}" data-p="dash">Tableau de bord</button>`+
+ S.filieres.map((f,i)=>`<button class="${page==="f:"+i?"on":""}" data-p="f:${i}">${esc(f)}</button>`).join("")+
+ `<button class="${page==="imp"?"on":""}" data-p="imp">＋ Importer un fichier</button>`}
+$("#nav").onclick=e=>{const p=e.target.dataset.p;if(p){page=p;if(p!=="imp"){imp=null;vimp=null}view()}};
+function allWeeks(){return [...new Set(S.seances.map(s=>wkOf(s.date)))].sort()}
+function dash(){
+ const W=allWeeks();
+ if(!W.length)return `<div class="card">Aucune donnée pour l’instant. Importez un premier fichier Excel avec « ＋ Importer un fichier ».</div>`;
+ if(!wsel||!W.includes(wsel)){const t=wkOf(new Date().toISOString().slice(0,10));wsel=W.includes(t)?t:W[W.length-1]}
+ return `<div class="bar"><label>Semaine : <select onchange="wsel=this.value;view()">${W.map(w=>`<option value="${w}" ${w===wsel?"selected":""}>du ${fr(w)}</option>`).join("")}</select></label>
+ <label>Début de semaine : <select onchange="S.weekStart=+this.value;save();view()">${[1,2,3,4,5,6,0].map(d=>`<option value="${d}" ${d===S.weekStart?"selected":""}>${JOURS[d]}</option>`).join("")}</select></label><label>Durée d’une séance : <input type="number" min="0.5" step="0.5" value="${S.dur}" style="width:70px" onchange="S.dur=Math.max(.5,+this.value||2);save();view()"> h</label><button class="btn pri" onclick="exportXlsx(-1)">Exporter toutes les filières en Excel</button></div>
+ <div class="grid">${S.filieres.map((f,i)=>{const h=S.seances.filter(s=>s.filiere===f&&wkOf(s.date)===wsel).reduce((a,s)=>a+s.dur,0);
+ return `<div class="card fc" onclick="page='f:${i}';view()"><b>${esc(f)}</b>${split(f)?gset(f).map(g=>`<div><span class="n" style="font-size:20px">${fh(S.seances.filter(s=>s.filiere===f&&(s.groupe||"")===g&&wkOf(s.date)===wsel).reduce((a,x)=>a+x.dur,0))}</span> <span class="mu">${esc(g?gname(g):"Sans groupe")}</span></div>`).join(""):`<span class="n">${fh(h)}</span>`}<div class="mu">heures réalisées cette semaine</div></div>`}).join("")}</div>`}
+/* ---------- Reconnaissance des noms de modules ---------- */
+const STOP=new Set("de du des la le les l d et en a au aux un une sur pour dans ou par".split(" "));
+const SYN={francai:"comm",communication:"comm",expression:"comm"}; // mots considérés comme équivalents
+function tok(s){const w=new Set(),n=new Set();
+ String(s).toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"").split(/[^a-z0-9]+/).filter(x=>x&&!STOP.has(x)).forEach(x=>{
+  if(/^\d+$/.test(x))n.add(x);else{x=x.length>3?x.replace(/[sx]$/,""):x;w.add(SYN[x]||x)}});return [w,n]}
+function lev(a,b){const d=Array.from({length:a.length+1},(_,i)=>[i]);for(let j=1;j<=b.length;j++)d[0][j]=j;
+ for(let i=1;i<=a.length;i++)for(let j=1;j<=b.length;j++)d[i][j]=Math.min(d[i-1][j]+1,d[i][j-1]+1,d[i-1][j-1]+(a[i-1]===b[j-1]?0:1));return d[a.length][b.length]}
+const teq=(a,b)=>a===b||(a.length>=6&&b.length>=6&&lev(a,b)<=1);
+function sim(a,b){
+ const [A,na]=tok(a),[B,nb]=tok(b);if(!A.size||!B.size)return 0;
+ if(na.size&&nb.size&&[...na].sort().join()!==[...nb].sort().join())return 0;
+ const inter=[...A].filter(x=>[...B].some(y=>teq(x,y))).length,mn=Math.min(A.size,B.size);
+ if(inter===A.size&&inter===B.size)return 1;
+ if(inter===mn)return mn>=2?.85:.6;
+ return 2*inter/(A.size+B.size)}
+function matchMods(mods,act,al){
+ const asg={},taken=new Set(),lab=r=>r.matiere||r.module;
+ mods.forEach(m=>{const i=act.findIndex(r=>r.k===al[m]);if(i>=0){asg[m]={i,how:"manuel"};taken.add(i)}});
+ mods.forEach(m=>{if(asg[m]||al[m]==="-")return;const i=act.findIndex(r=>norm(m)===norm(lab(r)));if(i>=0){asg[m]={i,how:"exact"};taken.add(i)}});
+ const P=[];
+ mods.forEach(m=>{if(asg[m]||al[m]==="-")return;act.forEach((r,i)=>{if(taken.has(i))return;
+  const s=Math.max(sim(m,lab(r)),r.matiere&&act.filter(x=>x.module===r.module).length===1?sim(m,r.module):0);if(s>=.6)P.push({m,i,s})})});
+ P.sort((a,b)=>b.s-a.s);
+ for(const p of P){if(asg[p.m]||taken.has(p.i))continue;
+  if(P.some(q=>q!==p&&!asg[q.m]&&!taken.has(q.i)&&(q.m===p.m||q.i===p.i)&&q.s>=p.s-.05))continue;
+  asg[p.m]={i:p.i,how:"auto"};taken.add(p.i)}
+ const um=mods.filter(m=>!asg[m]&&al[m]!=="-");
+ if(um.length===1){const g=act.map((r,i)=>i).filter(i=>!taken.has(i)&&act[i].matiere&&act.some((x,j)=>j!==i&&x.module===act[i].module&&taken.has(j)));
+  if(g.length===1)asg[um[0]]={i:g[0],how:"elim"}}
+ return asg}
+function tbl(f,g){
+ const L=S.seances.filter(s=>s.filiere===f&&(g==null||(s.groupe||"")===g)),W=[...new Set(L.map(s=>wkOf(s.date)))].sort(),V=S.vol[f],al=S.alias[f]||{};
+ const mods=[...new Set(L.map(s=>s.module))].sort((a,b)=>a.localeCompare(b,"fr")),used=new Set();
+ const hrs=(ms,w)=>L.filter(s=>ms.includes(s.module)&&(!w||wkOf(s.date)===w)).reduce((a,s)=>a+s.dur,0),R=[];
+ const act=V?V.rows.filter(r=>V.act.includes(r.sem||"Tous")):[],asg=V?matchMods(mods,act,al):{};
+ act.forEach((r,i)=>{const ms=mods.filter(m=>asg[m]&&asg[m].i===i);ms.forEach(m=>used.add(m));R.push({label:r.matiere||r.module,sub:r.matiere?r.module:"",ms,mh:ms.map(m=>asg[m].how),vol:r})});
+ mods.filter(m=>!used.has(m)).forEach(m=>R.push({label:m,ms:[m],orph:!!V}));
+ R.forEach(r=>{r.w=W.map(w=>hrs(r.ms,w));r.tot=hrs(r.ms);if(r.vol){r.reste=r.vol.total-r.tot;r.sc=Math.max(0,Math.ceil(r.reste/S.dur-1e-9))}});
+ const sv=k=>R.filter(r=>r.vol).reduce((a,r)=>a+(k==="p"?r.vol.total:r[k]),0);
+ return {L,W,V,R,free:R.filter(r=>r.vol&&!r.ms.length).map(r=>r.vol),sw:w=>hrs(mods,w),all:hrs(mods),pv:sv("p"),rs:sv("reste"),sc:sv("sc")}}
+function ftab(f,g){
+ const T=tbl(f,g),{W,R,V,free}=T,fi=S.filieres.indexOf(f);
+ const body=R.map(r=>{
+  const HW={auto:"reconnu automatiquement",elim:"par élimination, à vérifier",manuel:"association manuelle"};
+  const al=r.vol?r.ms.map((m,j)=>[m,r.mh[j]]).filter(x=>x[1]!=="exact").map(([m,hw])=>`<br><span class="mu">↔ ${esc(m)} · ${HW[hw]} <a href="#" title="Dissocier" data-m="${esc(m)}" onclick="setAlias(${fi},this.dataset.m,'-');return false">✕</a></span>`).join(""):"";
+  const opt=r.orph&&free.length?`<br><select data-m="${esc(r.ms[0])}" onchange="setAlias(${fi},this.dataset.m,this.value)"><option value="">Associer à une ligne du volume horaire…</option>${free.map(v=>`<option value="${esc(v.k)}">${esc(v.matiere||v.module)} (${esc(v.sem||"")})</option>`).join("")}</select>`:"";
+  const vc=V?(r.vol?`<td>${fh(r.vol.total)}</td><td class="${r.reste<0?"wa":""}">${fh(r.reste)}</td><td><b>${r.sc}</b></td>`:`<td class="z">—</td><td class="z">—</td><td class="z">—</td>`):"";
+  return `<tr><td>${esc(r.label)}${r.sub?`<br><span class="mu">${esc(r.sub)}</span>`:""}${r.orph?`<br><span class="wa">Absent du fichier du volume horaire</span>`:""}${al}${opt}</td>${r.w.map(v=>`<td class="${v?"":"z"}">${fh(v)}</td>`).join("")}<td><b>${fh(r.tot)}</b></td>${vc}</tr>`}).join("");
+ const vh=V?"<th>Volume prévu</th><th>Heures restantes</th><th>Séances restantes</th>":"";
+ const vf=V?`<td>${fh(T.pv)}</td><td>${fh(T.rs)}</td><td>${T.sc}</td>`:"";
+ return `${g!=null?`<h3 style="margin:16px 0 8px;font-size:15px">${esc(g?gname(g):"Sans groupe")}</h3>`:""}
+ ${V?`<div class="mu" style="margin-bottom:8px">Séances restantes = heures restantes ÷ ${fh(S.dur)} par séance (durée modifiable sur le tableau de bord), arrondi à l’entier supérieur. Volume prévu = « VH total » du fichier du volume horaire.</div>`:""}
+ <div class="card sc"><table><thead><tr><th>Nom du module</th>${W.map(w=>`<th title="Semaine du ${fr(w)}">Semaine du ${lab(w)}</th>`).join("")}<th>Total réalisé</th>${vh}</tr></thead><tbody>${body}</tbody><tfoot><tr><td>Total par semaine</td>${W.map(w=>`<td>${fh(T.sw(w))}</td>`).join("")}<td>${fh(T.all)}</td>${vf}</tr></tfoot></table></div>`}
+/* Groupes : un tableau indépendant par groupe quand la filière en compte plusieurs */
+const grps=f=>[...new Set(S.seances.filter(s=>s.filiere===f).map(s=>s.groupe||""))].filter(Boolean).sort((a,b)=>a.localeCompare(b,"fr",{numeric:true}));
+const split=f=>grps(f).length>1&&!S.merge[f];
+const gname=g=>g.replace(/^groupe\s*(\d+)/i,"Groupe $1").replace(/(\d)\(/,"$1 (");
+const gset=f=>split(f)?[...grps(f),...(S.seances.some(s=>s.filiere===f&&!s.groupe)?[""]:[])]:[null];
+function filv(f){
+ const fi=S.filieres.indexOf(f),n=grps(f).length;
+ return `${msg?`<div class="card ok">${esc(msg)}</div>`:""}<div class="bar"><h2 style="margin:0;font-size:17px">${esc(f)}</h2><button class="btn pri" onclick="exportXlsx(${fi})">Exporter en Excel</button>${n>1?`<label><input type="checkbox" ${split(f)?"checked":""} onchange="S.merge[S.filieres[${fi}]]=!this.checked;save();view()"> Un tableau par groupe</label>`:""}</div>`+gset(f).map(g=>ftab(f,g)).join("")}
+function setAlias(i,m,k){const f=S.filieres[i];S.alias[f]=S.alias[f]||{};if(k)S.alias[f][m]=k;else delete S.alias[f][m];save();view()}
+
+/* ---------- Export Excel ---------- */
+function aoa(f,g){
+ const T=tbl(f,g),{W,R,V}=T,r2=x=>Math.round(x*100)/100;
+ return [["Nom du module",...W.map(w=>"Semaine du "+lab(w)),"Total réalisé",...(V?["Volume prévu","Heures restantes","Séances restantes"]:[])],
+  ...R.map(r=>[r.label,...r.w.map(r2),r2(r.tot),...(V?(r.vol?[r.vol.total,r2(r.reste),r.sc]:["","",""]):[])]),
+  ["Total par semaine",...W.map(w=>r2(T.sw(w))),r2(T.all),...(V?[T.pv,r2(T.rs),T.sc]:[])]]}
+async function exportXlsx(i){
+ let dl=null;try{dl=window.claude?await claude.use("downloads"):null}catch(e){}
+ if(!dl){alert("Le téléchargement n’est pas disponible dans cette vue. Ouvrez la page depuis claude.ai.");return}
+ const names=i<0?S.filieres:[S.filieres[i]],wb=XLSX.utils.book_new(),used=new Set();
+ names.flatMap(f=>gset(f).map(g=>[f,g])).forEach(([f,g])=>{const gl=g==null?"":(g?gname(g).replace(/\s*\(.*\)$/,""):"Sans groupe"),fx=g==null?f:f.slice(0,Math.max(8,27-gl.length))+" "+gl;const b=(fx.replace(/[\[\]:*?\/\\]/g," ").slice(0,28).trim()||"Filière");let n=b,k=2;
+  while(used.has(n.toLowerCase()))n=b+" "+k++;used.add(n.toLowerCase());
+  const ws=XLSX.utils.aoa_to_sheet(aoa(f,g));ws["!cols"]=[{wch:60}];XLSX.utils.book_append_sheet(wb,ws,n)});
+ try{await dl.save({filename:"suivi-heures-"+(i<0?"toutes-filieres":norm(names[0]).slice(0,30))+".xlsx",data:new Blob([XLSX.write(wb,{bookType:"xlsx",type:"array"})])})}
+ catch(e){if(!e||e.code!=="declined")alert("Export impossible ("+((e&&e.code)||"erreur")+").")}}
+/* ---------- Volume horaire prévu ---------- */
+let vimp=null;
+function parseVol(rows,m,hi){
+ const out=[];let sem="",mod="";
+ for(const r of rows.slice(hi+1)){
+  const a=String(r[0]??"").trim();if(/^semestre/i.test(a))sem=a;
+  const b=m.mod>=0?String(r[m.mod]??"").trim():"",c=m.mat>=0?String(r[m.mat]??"").trim():"",t=r[m.tot];
+  if(b)mod=b;
+  const n=t===""||t==null?NaN:Number(String(t).replace(",","."));
+  if(!isFinite(n)||(!b&&!c))continue;
+  out.push({sem,module:mod,matiere:c,total:n,k:norm(sem)+"|"+norm(c||mod)})}
+ return out}
+function vparse(){const v=vimp;v.out=parseVol(v.rows,v.m,v.hi);const ss=[...new Set(v.out.map(r=>r.sem||"Tous"))];v.act=v.act.filter(s=>ss.includes(s));if(!v.act.length&&ss.length)v.act=[ss[0]]}
+function autoSem(){const v=vimp;if(!v.fil)return;const mods=[...new Set(S.seances.filter(s=>s.filiere===v.fil).map(s=>s.module))],ss=[...new Set(v.out.map(r=>r.sem||"Tous"))];let b=0,bs=ss.length?[ss[0]]:[];
+ ss.forEach(s=>{const n=new Set(Object.values(matchMods(mods,v.out.filter(r=>(r.sem||"Tous")===s),{})).map(a=>a.i)).size;if(n>b){b=n;bs=[s]}});v.act=bs}
+function togSem(s,c){const a=vimp.act;vimp.act=c?[...new Set([...a,s])]:a.filter(x=>x!==s);rImp()}
+async function pickVol(f){
+ if(!f)return;
+ try{const rows=await parse(f);let hi=rows.findIndex(r=>r.some(c=>norm(c)==="vhtotal"));if(hi<0)hi=0;
+  const h=Array.from(rows[hi],x=>String(x??"").trim()),fi=re=>h.findIndex(x=>re.test(norm(x)));
+  vimp={name:f.name,rows,hi,h,m:{mod:fi(/^module$/),mat:fi(/^matiere|element/),tot:fi(/^vhtotal$/)},fil:S.filieres.length===1?S.filieres[0]:"",out:[],act:[]};
+  vparse();autoSem();rImp()
+ }catch(e){alert("Fichier illisible. Vérifiez qu’il contient les colonnes « Module » et « VH total ».")}}
+function confVol(){const v=vimp;if(!S.filieres.includes(v.fil))S.filieres.push(v.fil);S.vol[v.fil]={rows:v.out,act:v.act.slice()};
+ msg=`Volume horaire enregistré pour « ${v.fil} » : ${v.out.filter(r=>v.act.includes(r.sem||"Tous")).length} ligne(s) appliquée(s) (${v.act.join(", ")}).`;
+ page="f:"+S.filieres.indexOf(v.fil);vimp=null;save();view()}
+function vimpHtml(){
+ let h=`<div class="card"><b>Fichier du volume horaire prévu</b><p class="mu" style="margin:6px 0 10px">Fichier de type « logigramme » : modules, éléments de module et volumes horaires. Il remplace le volume prévu déjà enregistré pour la filière choisie. Seules les colonnes de modules et de volumes sont lues (les noms d’enseignants ou numéros éventuels sont ignorés).</p><input type="file" accept=".xls,.xlsx,.xlsm,.csv" onchange="pickVol(this.files[0])"></div>`;
+ const v=vimp;if(!v)return h;
+ const ss=[...new Set(v.out.map(r=>r.sem||"Tous"))],act=v.out.filter(r=>v.act.includes(r.sem||"Tous")),mods=S.seances.filter(s=>s.filiere===v.fil).map(s=>norm(s.module));
+ const dk=[...new Set(act.map(r=>norm(r.matiere||r.module)).filter((k,i,a)=>a.indexOf(k)!==i))],okc=v.fil&&act.length&&v.m.tot>=0&&(v.m.mod>=0||v.m.mat>=0);
+ const sel=(k,l)=>`<label>${l}<select onchange="vimp.m['${k}']=+this.value;vparse();rImp()"><option value="-1">— non utilisée —</option>${v.h.map((c,i)=>`<option value="${i}" ${v.m[k]===i?"selected":""}>${esc(c||"(colonne "+(i+1)+")")}</option>`).join("")}</select></label>`;
+ h+=`<div class="card"><b>${esc(v.name)}</b> — ${v.out.length} ligne(s) de volume lue(s)
+ <div class="bar" style="margin-top:10px"><label>Filière concernée : <input type="text" list="fl2" value="${esc(v.fil)}" onchange="vimp.fil=this.value.trim();autoSem();rImp()" size="34"></label><datalist id="fl2">${S.filieres.map(f=>`<option value="${esc(f)}">`).join("")}</datalist></div>
+ <div class="bar">Semestres à appliquer : ${ss.map(s=>`<label><input type="checkbox" ${v.act.includes(s)?"checked":""} data-s="${esc(s)}" onchange="togSem(this.dataset.s,this.checked)"> ${esc(s)}</label>`).join(" ")}</div>
+ ${dk.length?`<p class="wa">Même nom présent dans plusieurs semestres cochés (${esc(dk.join(", "))}) : leurs heures seraient comptées deux fois. Ne cochez que le semestre concerné.</p>`:""}
+ <div class="map">${sel("mod","Colonne Module")}${sel("mat","Colonne Matière (élément de module)")}${sel("tot","Colonne volume horaire total *")}</div></div>`;
+ if(okc)h+=`<div class="card"><b>Aperçu avant confirmation</b> — ${act.length} ligne(s), dans l’ordre du fichier
+ ${v.fil&&mods.length?`<p>${new Set(Object.values(matchMods([...new Set(S.seances.filter(s=>s.filiere===v.fil).map(s=>s.module))],act,{})).map(a=>a.i)).size} ligne(s) sur ${act.length} reconnue(s) dans les séances déjà importées. Les noms sont comparés intelligemment (accents, pluriels, mots proches, équivalents comme Français/Communication). Les lignes non reconnues pourront être associées à la main sur la page de la filière.</p>`:""}
+ <div class="sc"><table><thead><tr><th>Module</th><th>Matière</th><th>Semestre</th><th>Volume</th></tr></thead><tbody>${act.map(r=>`<tr><td>${esc(r.module)}</td><td style="text-align:left">${esc(r.matiere)}</td><td style="text-align:left">${esc(r.sem)}</td><td>${fh(r.total)}</td></tr>`).join("")}</tbody></table></div></div>
+ <button class="btn pri" onclick="confVol()" ${dk.length?"":""}>Confirmer le volume horaire</button>`;
+ else h+=`<div class="card wa">Indiquez la filière et associez les colonnes marquées * pour voir l’aperçu.</div>`;
+ return h}
+function rImp(){
+ let h=`<div class="card"><p style="margin-top:0"><b>Fichier des séances réalisées</b><br>Choisissez un fichier d’extraction (.xls, .xlsx ou .csv). Il est analysé, comparé aux séances déjà enregistrées, puis vous confirmez.</p>
+ <input type="file" accept=".xls,.xlsx,.xlsm,.csv" onchange="pick(this.files[0])"></div>`;
+ if(imp){const o=imp.out,ok=imp.fil&&["module","date","hd","hf"].every(k=>imp.map[k]>=0);
+  h+=`<div class="card"><b>${esc(imp.name)}</b> — ${imp.rows.length} ligne(s) lue(s)
+  <div class="bar" style="margin-top:10px"><label>Filière de ce fichier : <input type="text" list="fl" value="${esc(imp.fil)}" onchange="imp.fil=this.value.trim();run()" size="34"></label>
+  <datalist id="fl">${S.filieres.map(f=>`<option value="${esc(f)}">`).join("")}</datalist></div>
+  <div class="map">${FIELDS.slice(0,6).map(([k,l])=>`<label>${l}<select onchange="imp.map['${k}']=+this.value;run()"><option value="-1">— non utilisée —</option>${imp.h.map((c,i)=>`<option value="${i}" ${imp.map[k]===i?"selected":""}>${esc(c||"(colonne "+(i+1)+")")}</option>`).join("")}</select></label>`).join("")}</div></div>`;
+  if(ok&&o){
+   h+=`<div class="card"><b>Aperçu avant confirmation</b>
+   <p>Nouvelles séances : <b class="ok">${o.nouv.length}</b> (${fh(o.nouv.reduce((a,s)=>a+s.dur,0))}) · Doublons ignorés : <b>${o.dup}</b> · À trancher : <b class="${o.conf.length?"wa":""}">${o.conf.length}</b> · Lignes invalides : <b>${o.bad.length}</b>${o.bad.length?` (lignes ${o.bad.slice(0,8).join(", ")}${o.bad.length>8?"…":""})`:""}</p>
+   <div class="sc"><table><thead><tr><th>Module</th><th>Date</th><th>Début</th><th>Fin</th><th>Durée</th></tr></thead><tbody>${o.prev.map(s=>`<tr><td>${esc(s.module)}</td><td>${fr(s.date)}</td><td>${s.hd}</td><td>${s.hf}</td><td>${fh(s.dur)}</td></tr>`).join("")}</tbody></table></div><div class="mu">Premières lignes lues (${o.prev.length} sur ${imp.rows.length}).</div></div>`;
+   if(o.conf.length)h+=`<div class="card"><b class="wa">Séances à confirmer</b> — aucune n’est ajoutée sans votre choix.${o.conf.map((c,i)=>{
+    const d=s=>`${fr(s.date)} ${s.hd}–${s.hf}`;
+    const opts=c.t==="mm"?[["skip","Même séance (ignorer)"],["new","Séance distincte (ajouter)"]]:[["new","Nouvelle séance"],...c.c.map(p=>["u:"+p.uid,"Modification de la séance existante du "+d(p)]),["skip","Autre situation (ne pas importer)"]];
+    const t=c.t==="near"?"Séance potentiellement modifiée ou nouvelle séance":c.t==="id"?"Même identifiant, données différentes":"Horaires identiques, séances non distinguables";
+    return `<div style="border-top:1px solid var(--bd);margin-top:10px;padding-top:8px"><div><b>${esc(c.s.module)}</b> — ${d(c.s)} <span class="mu">(${t})</span></div>
+    <select onchange="imp.out.conf[${i}].ch=this.value;rImp()"><option value="">— choisir —</option>${opts.map(([v,l])=>`<option value="${esc(v)}" ${c.ch===v?"selected":""}>${esc(l)}</option>`).join("")}</select></div>`}).join("")}</div>`;
+   const pend=o.conf.some(c=>!c.ch);
+   h+=`<button class="btn pri" ${pend||(!o.nouv.length&&!o.conf.length)?"disabled":""} onclick="apply()">Confirmer l’importation</button> ${pend?'<span class="mu">Choisissez une option pour chaque séance à confirmer.</span>':""}`;
+  }else h+=`<div class="card wa">Indiquez la filière et associez les colonnes marquées * pour voir l’aperçu.</div>`;
+ }
+ h+=vimpHtml();
+ if(S.seances.length)h+=`<div class="card" style="margin-top:14px"><button class="btn" onclick="if(confirm('Effacer toutes les données enregistrées ?')){S={filieres:[],seances:[],weekStart:S.weekStart,vol:{},alias:{},dur:S.dur,merge:{}};save();page='dash';view()}">Effacer toutes les données</button></div>`;
+ $("#main").innerHTML=h}
+function run(){if(imp.fil&&["module","date","hd","hf"].every(k=>imp.map[k]>=0))analyze();else imp.out=null;rImp()}
+async function pick(f){
+ if(!f)return;
+ try{const rows=await parse(f);if(rows.length<2)throw 0;
+  const h=rows[0].map(x=>String(x).trim()),map={};
+  FIELDS.forEach(([k,,al])=>{map[k]=-1;for(const a of al){const i=h.findIndex(x=>norm(x)===norm(a));if(i>=0){map[k]=i;break}}});
+  const body=rows.slice(1).filter(r=>r.some(x=>String(x).trim()!==""));
+  imp={name:f.name,h,rows:body,map,fil:map.fil>=0&&body.length?String(body[0][map.fil]).trim():""};run()
+ }catch(e){alert("Fichier illisible. Vérifiez qu’il contient une ligne d’en-têtes suivie des séances.")}}
+function view(){nav();if(page==="dash")$("#main").innerHTML=dash();else if(page==="imp")rImp();else{const f=S.filieres[+page.slice(2)];$("#main").innerHTML=f?filv(f):dash()}msg=""}
+load().then(()=>{if(!S.seances.length)page="imp";view()});
+</script></body></html>
